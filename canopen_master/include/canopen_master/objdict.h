@@ -60,7 +60,7 @@ public:
     
     template<typename T> HoldAny(const T &t) : type_guard(TypeGuard::create<T>()), empty(false){
         buffer.resize(sizeof(T));
-        *(T*)&buffer[0] = t;
+        *(T*)&(buffer.front()) = t;
     }
     HoldAny(const std::string &t): type_guard(TypeGuard::create<std::string>()), empty(false){
         if(!type_guard.is_type<std::string>()){
@@ -85,7 +85,7 @@ public:
         }else if(empty){
             BOOST_THROW_EXCEPTION(std::length_error("buffer empty"));
         }
-        return *(T*)&buffer[0];
+        return *(T*)&(buffer.front());
     }
 };
 
@@ -186,8 +186,8 @@ public:
         return res.second;
     }
     bool iterate(boost::unordered_map<Key, boost::shared_ptr<const Entry> >::const_iterator &it) const;
-    static boost::shared_ptr<ObjectDict> fromFile(const std::string &path);
-    
+    typedef std::list<std::pair<std::string, std::string> > Overlay;
+    static boost::shared_ptr<ObjectDict> fromFile(const std::string &path, const Overlay &overlay = Overlay());
     const DeviceInfo device_info;
     
     ObjectDict(const DeviceInfo &info): device_info(info) {}
@@ -252,7 +252,7 @@ protected:
             if(!valid){
                 BOOST_THROW_EXCEPTION(std::length_error("buffer not valid"));
             }
-            return *(T*)&buffer[0];
+            return *(T*)&(buffer.front());
         }
         template <typename T> T & allocate(){
             if(!valid){
@@ -314,8 +314,20 @@ protected:
                 write_delegate(*entry, buffer);
             }
         }
+        template<typename T>  void set_cached(const T &val) {
+            boost::mutex::scoped_lock lock(mutex);
+            if(!valid || val != access<T>() ){
+                if(!entry->writable){
+                        BOOST_THROW_EXCEPTION( AccessException(key) );
+                }else{
+                    allocate<T>() = val;
+                    write_delegate(*entry, buffer);
+                }
+            }
+        }
         void init();
         void reset();
+        void force_write();
 
     };        
         
@@ -328,21 +340,47 @@ public:
         boost::shared_ptr<Data> data;
     public:
         typedef T type;
+        bool valid() const { return data != 0; }
         const T get() {
             if(!data) BOOST_THROW_EXCEPTION( PointerInvalid() );
 
             return data->get<T>(false);
-        }        
+        }    
+        bool get(T & val){
+            try{
+                val = get();
+                return true;
+            }catch(...){
+                return false;
+            }
+        }    
         const T get_cached() {
             if(!data) BOOST_THROW_EXCEPTION( PointerInvalid() );
 
             return data->get<T>(true);
         }        
+        bool get_cached(T & val){
+            try{
+                val = get_cached();
+                return true;
+            }catch(...){
+                return false;
+            }
+        }    
         void set(const T &val) {
             if(!data) BOOST_THROW_EXCEPTION( PointerInvalid() );
             data->set(val);
         }
-        
+        bool set_cached(const T &val) {
+            if(!data) return false;
+            try{
+	            data->set_cached(val);
+				return true;
+            }catch(...){
+                return false;
+            }
+        }
+ 
         Entry() {}
         Entry(boost::shared_ptr<Data> &d)
         : data(d){

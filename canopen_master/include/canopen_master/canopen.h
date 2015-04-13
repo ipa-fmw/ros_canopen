@@ -73,6 +73,7 @@ class PDOMapper{
         void write(const uint8_t* b, const size_t len);
         void read(const canopen::ObjectDict::Entry &entry, String &data);
         void write(const canopen::ObjectDict::Entry &, const String &data);
+        void clean() { dirty = false; }
         const size_t size;
         Buffer(const size_t sz) : size(sz), dirty(false), empty(true), buffer(sz) {}
         
@@ -108,7 +109,7 @@ class PDOMapper{
     };
     
     struct RPDO : public PDO{
-        void sync();
+        void sync(LayerStatus &status);
         static boost::shared_ptr<RPDO> create(const boost::shared_ptr<can::CommInterface> interface, const boost::shared_ptr<ObjectStorage> &storage, const uint16_t &com_index, const uint16_t &map_index){
             boost::shared_ptr<RPDO> rpdo(new RPDO(interface));
             if(!rpdo->init(storage, com_index, map_index))
@@ -133,17 +134,34 @@ class PDOMapper{
 
 public:
     PDOMapper(const boost::shared_ptr<can::CommInterface> interface);
-    bool read();
+    void read(LayerStatus &status);
     bool write();
     void init(const boost::shared_ptr<ObjectStorage> storage);
+};
+
+class EMCYHandler{
+    bool has_error_;
+    ObjectStorage::Entry<uint8_t> error_register_;
+    ObjectStorage::Entry<uint8_t> num_errors_;
+    can::CommInterface::FrameListener::Ptr emcy_listener_;
+    void handleEMCY(const can::Frame & msg);
+    const boost::shared_ptr<ObjectStorage> storage_;
+public:
+    virtual void init();
+    virtual void recover();
+    virtual void diag(LayerReport &report);
+    virtual void read(LayerStatus &status);
+    const uint8_t error_register();
+    EMCYHandler(const boost::shared_ptr<can::CommInterface> interface, const boost::shared_ptr<ObjectStorage> storage);
 };
 
 struct SyncProperties{
     const can::Header header_;
     const boost::posix_time::time_duration period_;
+    const boost::posix_time::time_duration silence_;
     const uint8_t overflow_;
-    SyncProperties(const can::Header &h, const boost::posix_time::time_duration &p, const uint8_t &o) : header_(h), period_(p), overflow_(o) {}
-    bool operator==(const SyncProperties &p) const { return p.header_ == (int) header_ && p.overflow_ == overflow_ && p.period_ == period_; }
+    SyncProperties(const can::Header &h, const boost::posix_time::time_duration &p, const boost::posix_time::time_duration &s, const uint8_t &o) : header_(h), period_(p), silence_(s), overflow_(o) {}
+    bool operator==(const SyncProperties &p) const { return p.header_ == (int) header_ && p.overflow_ == overflow_ && p.period_ == period_ && p.silence_ == silence_; }
 
 };
 
@@ -155,7 +173,7 @@ public:
     virtual  void removeNode(void * const ptr) = 0;
 };
 
-class Node : public SimpleLayer{
+class Node : public Layer{
 public:
     enum State{
         Unknown = 255, BootUp = 0, Stopped = 4, Operational = 5 , PreOperational = 127
@@ -168,11 +186,11 @@ public:
     
     const boost::shared_ptr<ObjectStorage> getStorage() { return sdo_.storage_; }
     
-    void start();
-    void stop();
-    void reset();
-    void reset_com();
-    void prepare();
+    bool start();
+    bool stop();
+    bool reset();
+    bool reset_com();
+    bool prepare();
     
     typedef fastdelegate::FastDelegate1<const State&> StateDelegate;
     typedef can::Listener<const StateDelegate, const State&> StateListener;
@@ -185,18 +203,17 @@ public:
         return getStorage()->entry<T>(k).get();
     }
 
-    virtual bool read();
-    virtual bool write();
-    virtual void diag(LayerReport &report);
-    virtual bool report() { return false; } //unused
-    virtual void init(LayerStatus &status);
-    virtual bool init() { return false; } //unused
-    virtual void recover(LayerStatus &status);
-    virtual bool recover() { return false; } //unused
-    virtual bool shutdown();
-    
 private:
-    template<typename T> void wait_for(const State &s, const T &timeout);
+    virtual void handleDiag(LayerReport &report);
+
+    virtual void handleInit(LayerStatus &status);
+    virtual void handleRecover(LayerStatus &status);
+    virtual void handleRead(LayerStatus &status, const LayerState &current_state);
+    virtual void handleWrite(LayerStatus &status, const LayerState &current_state);
+    virtual void handleHalt(LayerStatus &status);
+    virtual void handleShutdown(LayerStatus &status);
+
+    template<typename T> int wait_for(const State &s, const T &timeout);
     
     boost::timed_mutex mutex;
     boost::mutex cond_mutex;
@@ -205,22 +222,22 @@ private:
     const boost::shared_ptr<can::CommInterface> interface_;
     const boost::shared_ptr<SyncCounter> sync_;
     can::CommInterface::FrameListener::Ptr nmt_listener_;
-    can::CommInterface::FrameListener::Ptr emcy_listener_;
     
     ObjectStorage::Entry<ObjectStorage::DataType<ObjectDict::DEFTYPE_UNSIGNED16>::type> heartbeat_;
     
     can::SimpleDispatcher<StateListener> state_dispatcher_;
     
     void handleNMT(const can::Frame & msg);
-    void handleEMCY(const can::Frame & msg);
     void switchState(const uint8_t &s);
 
     State state_;
     SDOClient sdo_;
-    //EMCYHandler emcy;
+    EMCYHandler emcy_;
     PDOMapper pdo_;
 
     boost::chrono::high_resolution_clock::time_point heartbeat_timeout_;
+    double getHeartbeatInterval() { return heartbeat_.valid()?heartbeat_.get_cached() : 0; }
+    void setHeartbeatInterval() { if(heartbeat_.valid()) heartbeat_.set(heartbeat_.desc().value().get<uint16_t>()); }
     bool checkHeartbeat();
 };
 

@@ -90,7 +90,9 @@ struct SegmentLong{
     size_t apply_buffer(const String &buffer, const size_t offset){
         size_t size = buffer.size() - offset;
         if(size > 7) size = 7;
-        num = size;
+        else done = 1;
+        num = 7 - size;
+        memcpy(payload, buffer.data() + offset, size);
         return offset + size;
     }
 };
@@ -168,7 +170,7 @@ struct UploadInitiateResponse: public FrameOverlay<InitiateLong>{
         UploadInitiateRequest req(msg);
         if(req.data.command ==  UploadInitiateRequest::command && data.index == req.data.index && data.sub_index == req.data.sub_index){
                 size_t ds = data.data_size();
-                if(ds == 0  || size == 0 || ds == size) {
+                if(ds == 0  || size == 0 || ds >= size) { // should be ==, but >= is needed for Elmo, it responses with more byte than requested
                     if(!data.expedited || (ds <= 4 && size <= 4)) return true;
                 }else{
                     reason = 0x06070010; // Data type does not match, length of service parameter does not match                    
@@ -179,13 +181,14 @@ struct UploadInitiateResponse: public FrameOverlay<InitiateLong>{
         return false;
     }
     bool read_data(String & buffer, size_t & offset, size_t & total){
-        if(data.expedited){
-            memcpy(&buffer[0], data.payload, buffer.size());
-            offset = buffer.size();
-            return true;
-        }else if(data.size_indicated && total == 0){
+        if(data.size_indicated && total == 0){
             total = data.data_size();
             buffer.resize(total);
+        }
+        if(data.expedited){
+            memcpy(&buffer.front(), data.payload, buffer.size());
+            offset = buffer.size();
+            return true;
         }
         return false;
     }
@@ -399,6 +402,7 @@ void SDOClient::init(){
 }
 void SDOClient::wait_for_response(){
     boost::mutex::scoped_lock cond_lock(cond_mutex);
+    boost::this_thread::disable_interruption di;
     done = false;
     time_point abs_time = get_abs_time(boost::chrono::seconds(1));
     while(!done){
